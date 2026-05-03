@@ -1,0 +1,36 @@
+# Secrets — never commit
+rpc.txt
+.pyxatu_config.json
+*.pem
+*.key
+.env
+.env.*
+secrets/
+config/
+google-creds*.json
+
+# Internal notes (Claude memory mirror, not for public repo)
+memory/
+
+# Upstream clone — not part of this project even if re-cloned locally
+blk-lvl-warming-analysis/
+
+# Extracted data (large)
+data/
+/tmp/balwarming/
+*.parquet
+
+# Logs and run artifacts
+*.log
+nohup.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
