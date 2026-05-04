@@ -107,8 +107,16 @@ def warn_on_gaps(df: pd.DataFrame) -> None:
               f"savings under non-trivial windows will undercount. First missing: {sorted(missing)[:5]}")
 
 
-def summarize(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+def summarize(df: pd.DataFrame, windows: list[int], warmup_blocks: int = 0) -> pd.DataFrame:
+    """Per-window saving summary. If warmup_blocks > 0, blocks within the first
+    `warmup_blocks` of the dataset are excluded from the aggregation: those blocks
+    don't have enough prior history within the data to fairly evaluate large
+    windows (their `block_gap` is bounded by their position in the data, not by W).
+    Setting warmup_blocks = max(windows) gives the unbiased asymptotic rate."""
     df["full_saving"] = df["opcode"].map(SAVING).fillna(0).astype(np.int32)
+    if warmup_blocks > 0:
+        first_block = int(df["block_number"].min())
+        df = df[df["block_number"] >= first_block + warmup_blocks]
     cold = df[df["warm_cold"] == "cold"]
     total_cold = len(cold)
     total_full = int(cold["full_saving"].sum())
@@ -166,7 +174,10 @@ def per_block_savings(df: pd.DataFrame, windows: list, meta: pd.DataFrame) -> pd
     return out
 
 
-def per_opcode_breakdown(df: pd.DataFrame, W: int) -> pd.DataFrame:
+def per_opcode_breakdown(df: pd.DataFrame, W: int, warmup_blocks: int = 0) -> pd.DataFrame:
+    if warmup_blocks > 0:
+        first_block = int(df["block_number"].min())
+        df = df[df["block_number"] >= first_block + warmup_blocks]
     cold = df[df["warm_cold"] == "cold"].copy()
     if "full_saving" not in cold.columns:
         cold["full_saving"] = cold["opcode"].map(SAVING).fillna(0).astype(np.int32)
@@ -191,8 +202,13 @@ def main():
                    help="Optional CSV path to write the window summary.")
     p.add_argument("--per-block-out", default=None,
                    help="Optional path to write per-block savings parquet (consumed by the notebook).")
+    p.add_argument("--warmup-blocks", type=int, default=-1,
+                   help="Drop the first N blocks from the saving-rate aggregation so they "
+                        "don't drag the rate down with their truncated lookback. Default -1 "
+                        "auto-sets to max(windows). Pass 0 to disable filtering.")
     args = p.parse_args()
     windows = [int(x) for x in args.windows.split(",")]
+    warmup = max(windows) if args.warmup_blocks < 0 else args.warmup_blocks
 
     df = load_blocks(args.dir)
     meta = load_meta(args.dir)
@@ -204,14 +220,15 @@ def main():
 
     df = compute_block_gaps(df)
 
-    summary = summarize(df, windows)
-    print("\n=== Saving by warming window ===")
+    summary = summarize(df, windows, warmup_blocks=warmup)
+    print(f"\n=== Saving by warming window (warmup_blocks={warmup}, "
+          f"reporting on {df.block_number.nunique() - warmup} blocks) ===")
     pd.options.display.float_format = "{:.4f}".format
     print(summary.to_string(index=False))
 
     Wmax = max(windows)
-    print(f"\n=== Per-opcode savings at window={Wmax} ===")
-    print(per_opcode_breakdown(df, Wmax).to_string())
+    print(f"\n=== Per-opcode savings at window={Wmax} (warmup_blocks={warmup}) ===")
+    print(per_opcode_breakdown(df, Wmax, warmup_blocks=warmup).to_string())
 
     if args.out:
         summary.to_csv(args.out, index=False)
