@@ -152,6 +152,15 @@ A zkEVM prover charges every access opcode with one inclusion or non-inclusion p
 
 The WAM is new state, so a ZK-friendly commitment does not break compatibility with the existing MPT/Keccak state trie.
 
+### Why a separate `wam_root`
+
+The WAM is deterministic from the chain of `BAL` commitments, so `wam_root` is technically redundant with the historical `block_access_list_hash` fields, the same way `state_root` is technically redundant with genesis plus all transactions. The commitment is included because re-deriving it on demand is too expensive for the verifiers that matter:
+
+- a zkEVM prover would need to prove the 7200-block WAM transition inside the circuit, or feed the full WAM as witness;
+- a light or stateless client would need to download all 7200 BALs to check a single warmness query.
+
+With `wam_root`, both reduce to one 256-hash proof against the block header. The cost is 32 bytes per header and an incremental SMT update per block.
+
 ### No new gas constants
 
 Reusing existing warm/cold costs keeps the gas table small and lets gas estimation, fuzzers, and compilers continue to work without modification.
