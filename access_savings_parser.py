@@ -141,8 +141,13 @@ def summarize(df: pd.DataFrame, windows: list[int], warmup_blocks: int = 0) -> p
 
 
 def per_block_savings(df: pd.DataFrame, windows: list, meta: pd.DataFrame) -> pd.DataFrame:
-    """One row per block. Columns: block_number, gas_used, timestamp, max_saving,
-       saving_W{w}, pct_saving_W{w} for each window w in `windows`."""
+    """One row per block. Columns:
+       block_number, gas_used, timestamp, max_saving, cold_count,
+       saving_W{w}     -- gas saved at window W (cold accesses converted to warm)
+       hits_W{w}       -- count of access opcodes converted from cold to warm at window W
+       pct_saving_W{w} -- saving_W{w} / gas_used * 100
+       pct_max_saving  -- max possible saving as % of gas_used
+    """
     df["full_saving"] = df["opcode"].map(SAVING).fillna(0).astype(np.int32)
     cold_mask = (df["warm_cold"] == "cold").values
     full = df["full_saving"].values
@@ -159,10 +164,15 @@ def per_block_savings(df: pd.DataFrame, windows: list, meta: pd.DataFrame) -> pd
         full_here = full[idxs]
         gap_here = gap[idxs]
         max_save = int(full_here[cold_here].sum())
-        row = {"block_number": int(bn), "max_saving": max_save}
+        row = {
+            "block_number": int(bn),
+            "max_saving": max_save,
+            "cold_count": int(cold_here.sum()),
+        }
         for W in windows:
             sel = cold_here & (gap_here <= W)
             row[f"saving_W{W}"] = int(full_here[sel].sum())
+            row[f"hits_W{W}"] = int(sel.sum())
         out_rows.append(row)
     out = pd.DataFrame(out_rows)
     if not meta.empty:
@@ -170,6 +180,7 @@ def per_block_savings(df: pd.DataFrame, windows: list, meta: pd.DataFrame) -> pd
                         on="block_number", how="left")
         for W in windows:
             out[f"pct_saving_W{W}"] = out[f"saving_W{W}"] / out["gas_used"] * 100.0
+            out[f"hit_rate_W{W}"] = out[f"hits_W{W}"] / out["cold_count"].replace(0, np.nan)
         out["pct_max_saving"] = out["max_saving"] / out["gas_used"] * 100.0
     return out
 
