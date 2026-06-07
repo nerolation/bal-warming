@@ -52,9 +52,13 @@ def main(out_dir):
     ax.set_ylabel("Per-block median (%)")
     ax.set_title("Multi-block warming: benefit vs window size")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="lower right")
     ax.set_xlim(ws[0] / 1.3, ws[-1] * 1.3)
     ax.set_ylim(0, max(asymptote_gas + 5, max(pct_ops) + 5))
+    # Legend centered both horizontally and vertically (in the empty band between the
+    # green gas-saved line at the bottom and the blue cold-ops line, which by W~50 is
+    # already past 70 %).
+    ax.legend(loc="center", bbox_to_anchor=(0.5, 0.42),
+              framealpha=0.92, fontsize=9)
 
     # Annotate a few key Ws
     for w in (8, 32, 128, 1024):
