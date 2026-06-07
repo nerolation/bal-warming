@@ -1,7 +1,7 @@
 ---
 eip: <to be assigned>
 title: Multi-block warming via a rolling warm-access multiset
-description: Maintain a rolling 7200-block (~24 h) warm-access multiset derived from Block Access Lists; treat its items as already-accessed at the start of every transaction.
+description: Maintain a rolling 256-block (~51 min) warm-access multiset derived from Block Access Lists; treat its items as already-accessed at the start of every transaction.
 author: <TBD>
 discussions-to: <TBD>
 status: Draft
@@ -13,20 +13,20 @@ requires: 2929, 2930, 7928
 
 ## Abstract
 
-A new chain-state structure, the **warm-access multiset (WAM)**, maps each `(address, slot?)` item to the number of the last 7200 blocks whose Block Access List (BAL, per EIP-7928) contains that item. Items present in the WAM at the start of a block are treated as already-accessed for EIP-2929 pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes 100 instead of 2100. The WAM updates incrementally each block (+1 for items in the new BAL, −1 for items in the BAL aging out), so additions and removals are O(|BAL|) per block.
+A new chain-state structure, the **warm-access multiset (WAM)**, maps each `(address, slot?)` item to the number of the last 256 blocks whose Block Access List (BAL, per EIP-7928) contains that item. Items present in the WAM at the start of a block are treated as already-accessed for EIP-2929 pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes 100 instead of 2100. The WAM updates incrementally each block (+1 for items in the new BAL, −1 for items in the BAL aging out), so additions and removals are O(|BAL|) per block.
 
 ## Motivation
 
-EIP-2929's access list resets at every transaction. The same `(contract, slot)` pairs and contract addresses pay the cold cost thousands of times per day across blocks. Empirical analysis of 2 000 mainnet blocks shows ~10 % per-block gas savings at an 8-block (~96 s) warming horizon, ~15 % at 1024 blocks (~3.4 h), with a per-block-median upper bound of 18.4 %. A 24-hour window (7200 blocks) is well clear of the finality horizon and captures essentially the full recoverable amount.
+EIP-2929's access list resets at every transaction. The same `(contract, slot)` pairs and contract addresses pay the cold cost thousands of times per day across blocks. Empirical analysis of mainnet blocks shows ~10 % per-block gas savings at an 8-block (~96 s) warming horizon and ~14 % at 256 blocks (~51 min), against a per-block-median upper bound of 18.4 %. A 256-block window captures ~76 % of the recoverable amount at ~10 MB of state.
 
-A naive implementation (store 7200 raw BALs, recompute their union each block) walks ~3 000 items per block of work. The multiset-with-refcounts representation specified here makes membership testing O(1) and per-block update O(|BAL_in| + |BAL_out|), independent of the window size.
+A naive implementation (store the raw BALs, recompute their union each block) walks ~3 000 items per block of work. The multiset-with-refcounts representation specified here makes membership testing O(1) and per-block update O(|BAL_in| + |BAL_out|), independent of the window size.
 
 ## Specification
 
 ### Constants
 
 ```
-WARMING_WINDOW = 7200          # blocks (~24 h at 12 s/slot)
+WARMING_WINDOW = 256           # blocks (~51 min at 12 s/slot)
 ```
 
 ### Item type
@@ -117,27 +117,29 @@ Multi-block warming is a sliding-window union of BAL items. Three representation
 
 | Representation | Membership test | Per-block update | Recompute on reorg |
 |---|---|---|---|
-| Store 7200 raw BALs, recompute union per query | O(7200) lookups | O(1), shift the ring | O(1) |
-| Store 7200 raw BALs, materialize union as a set | O(1) | O(union recompute), expensive | O(union recompute) |
+| Store 256 raw BALs, recompute union per query | O(256) lookups | O(1), shift the ring | O(1) |
+| Store 256 raw BALs, materialize union as a set | O(1) | O(union recompute), expensive | O(union recompute) |
 | **Refcounted multiset (this EIP)** | **O(1)** | **O(\|BAL_in\| + \|BAL_out\|)** | **O(WARMING_WINDOW · avg \|BAL\|)** |
 
 The multiset wins on both hot paths: membership during tx execution and steady-state per-block update. Reorg cost is identical across representations.
 
-### Why 7200 blocks
+### Why 256 blocks
 
-Saving rate vs warming window, from a 2 000-block mainnet sample (median per-block percentage of `gasUsed`):
+Median per-block trade-off on a 5 731-block mainnet sample:
 
-| W | Time back | Median saving | % of cold gas eliminated |
-|---:|---:|---:|---:|
-| 0 | 0 s | 4.8 % | 27.6 % |
-| 1 | 12 s | 7.0 % | 37.2 % |
-| 8 | 96 s | 10.1 % | 54.9 % |
-| 64 | 12.8 min | 13.2 % | 69.4 % |
-| 256 | 51.2 min | 14.4 % | 75.4 % |
-| 1024 | 3.4 h | 15.2 % | 80.4 % |
-| Asymptote | n/a | 18.4 % | 100 % |
+| W | Time back | % cold ops flipped | % gas saved | WAM (MB) |
+|---:|---:|---:|---:|---:|
+| 8 | 96 s | 57 % | 10.1 % | 0.6 |
+| 32 | 6.4 min | 68 % | 12.1 % | 2 |
+| 128 | 25.6 min | 77 % | 13.5 % | 6 |
+| **256** | **51 min** | **80 %** | **14.1 %** | **10** |
+| 512 | 102 min | 82 % | 14.4 % | 18 |
+| 1024 | 3.4 h | 83 % | 14.7 % | 31 |
+| Asymptote | n/a | 100 % | 18.4 % | n/a |
 
-Each doubling past W=1024 adds < 0.3 percentage points. 7 200 (24 h) is the smallest natural cadence that recovers ≥ 95 % of the asymptote while remaining well clear of the finality horizon (~12.8 min for two epochs), so reorgs cannot disturb the bulk of the window.
+W=256 captures ~76 % of the gas asymptote at ~10 MB of WAM state and sits 4× past the finality horizon. The next doubling (W=512) triples the marginal cost per added warm conversion for only ~2 percentage points more, so W=256 is at the inflection of the cost-benefit curve.
+
+Implementations that prioritise memory can pick W=8 (~0.6 MB, 57 % ops), W=16 (~1 MB, 64 %), or W=32 (~2 MB, 68 %, also one epoch). Implementations with memory to spare can pick W=512 (~18 MB, 82 %); past that the cost-benefit deteriorates sharply.
 
 ### Reuse of EIP-7928 BALs
 
@@ -156,8 +158,8 @@ The WAM is new state, so a ZK-friendly commitment does not break compatibility w
 
 The WAM is deterministic from the chain of `BAL` commitments, so `wam_root` is technically redundant with the historical `block_access_list_hash` fields, the same way `state_root` is technically redundant with genesis plus all transactions. The commitment is included because re-deriving it on demand is too expensive for the verifiers that matter:
 
-- a zkEVM prover would need to prove the 7200-block WAM transition inside the circuit, or feed the full WAM as witness;
-- a light or stateless client would need to download all 7200 BALs to check a single warmness query.
+- a zkEVM prover would need to prove the 256-block WAM transition inside the circuit, or feed the full WAM as witness;
+- a light or stateless client would need to download all 256 BALs to check a single warmness query.
 
 With `wam_root`, both reduce to one 256-hash proof against the block header. The cost is 32 bytes per header and an incremental SMT update per block.
 
@@ -169,11 +171,11 @@ Reusing existing warm/cold costs keeps the gas table small and lets gas estimati
 
 Forward-only: every existing transaction pays the same or less gas. No transaction becomes invalid. EIP-2930 access lists remain valid and are pre-warmed (idempotent overlap with the WAM).
 
-**State cost.** From the 2 000-block sample, ~3 000 distinct items per block enter the WAM with heavy overlap across blocks. Empirical WAM size after 7 200 blocks: 5–10 million distinct items, ~300–700 MB at 60 bytes per entry, plus SMT internal nodes. Comparable to the EIP-7928 BAL history nodes already retain.
+**State cost.** From a 5 731-block mainnet sample, ~3 000 distinct items per block enter the WAM with heavy overlap. Empirical WAM size at W=256: ~170 000 distinct items, ~10 MB at 60 bytes per entry, plus SMT internal nodes. Comparable to the EIP-7928 BAL history nodes already retain.
 
 **Block header.** One new 32-byte field `wam_root`. Validators verify it matches the SMT root after the per-block transition.
 
-**Worst-case state.** Bounded by `WARMING_WINDOW × max_distinct_items_per_block`, which is bounded by the block gas limit. A pathological block of only unique cold storage accesses contributes ~16 000 items; the worst-case WAM is ~115 million items ≈ 7 GB. No realistic mainnet workload approaches this.
+**Worst-case state.** Bounded by `WARMING_WINDOW × max_distinct_items_per_block`, which is bounded by the block gas limit. A pathological block of only unique cold storage accesses contributes ~16 000 items; the worst-case WAM at W=256 is ~4 million items ≈ 250 MB. No realistic mainnet workload approaches this.
 
 ## Test Cases
 
@@ -181,8 +183,8 @@ To be added. Reference scenarios:
 
 1. Block `N−1`: SLOAD on `(c, s)`. Cold (2100). `items(BAL(N−1))` now contains `Slot(c, s)`.
 2. Block `N`: WAM has `Slot(c, s) → 1`. SLOAD on `(c, s)`. **Warm (100)**.
-3. Blocks `N+1 … N+7200`: SLOAD on `(c, s)` once per block. WAM count increments to ≤ 7201 then decrements as the oldest contributing block ages out; the item stays warm.
-4. Block `N+7201`: assume `(c, s)` was not touched after `N`. The transition adds `items(BAL(N+7200))` (no `(c, s)`) and removes `items(BAL(N))` (contains `(c, s)`). `WAM[Slot(c, s)]` drops to 0 and is deleted. SLOAD on `(c, s)`: **Cold (2100)**.
+3. Blocks `N+1 … N+256`: SLOAD on `(c, s)` once per block. WAM count increments to ≤ 257 then decrements as the oldest contributing block ages out; the item stays warm.
+4. Block `N+257`: assume `(c, s)` was not touched after `N`. The transition adds `items(BAL(N+256))` (no `(c, s)`) and removes `items(BAL(N))` (contains `(c, s)`). `WAM[Slot(c, s)]` drops to 0 and is deleted. SLOAD on `(c, s)`: **Cold (2100)**.
 
 ## Reference Implementation
 
@@ -196,7 +198,7 @@ Inflating the WAM costs the attacker ≥ 2100 gas per item, the same as today. T
 
 ### Memory pressure
 
-At 300–700 MB the WAM fits in memory alongside other node caches. A hash map of items to small counters does not require cold-tier storage.
+At ~10 MB the WAM fits trivially in memory alongside other node caches. A hash map of items to small counters does not require cold-tier storage.
 
 ### Reorg behavior
 
