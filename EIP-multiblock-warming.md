@@ -75,14 +75,14 @@ Each block transition mutates the WAM in place; nodes do not need to store any p
 The WAM is committed to by a binary Sparse Merkle Tree (SMT) of depth 256:
 
 ```
-leaf_key(item) = H(serialize(item))           # 256-bit
+leaf_key(item) = SHA256(serialize(item))      # 256-bit
 leaf_value     = u32 counter (0 if absent)
 WAM_ROOT       = SMT root over { leaf_key → leaf_value }
 ```
 
-`H` is a ZK-friendly hash (Poseidon-128) used for both leaf keys and node hashing. `WAM_ROOT` is included in the block header as a new field. The per-block transition above updates the SMT incrementally: one leaf update per item in `ADD ∪ DEL`, yielding the new root. The order does not affect the final root because SMT structure is determined by leaf keys, not by insertion order.
+SHA-256 is used for both leaf keys and node hashing (the same hash already used by Ethereum's beacon-chain SSZ Merkleization, and the precompile at address `0x02`). `WAM_ROOT` is included in the block header as a new field. The per-block transition above updates the SMT incrementally: one leaf update per item in `ADD ∪ DEL`, yielding the new root. Order does not affect the final root because SMT structure is determined by leaf keys, not insertion order.
 
-An inclusion proof (item is warm, with its counter) or non-inclusion proof (item is absent) consists of 256 sibling hashes — a fixed shape independent of `|WAM|`.
+An inclusion proof (item is warm, with its counter) or non-inclusion proof (item is absent) consists of 256 sibling hashes — a fixed shape independent of `|WAM|`. If a future EIP introduces a ZK-friendly hash precompile (e.g., Poseidon), this EIP can be upgraded by swapping `SHA256` without changing the tree structure.
 
 ### Access-list initialization in transactions
 
@@ -137,9 +137,14 @@ Each doubling past W=1024 adds < 0.3 percentage points. 7 200 (24 h) is the smal
 
 EIP-7928 introduces a canonical Block Access List committed to the block header. This proposal reuses that artifact as the per-block "add" set and (via history lookup) as the "delete" set. Without EIP-7928, multi-block warming requires its own access-list commitment mechanism, which is out of scope here.
 
-### Binary SMT with Poseidon, not MPT with Keccak
+### Binary SMT (not MPT) and SHA-256 (not Keccak)
 
-A zkEVM prover charges every access opcode with one inclusion or non-inclusion proof against `WAM_ROOT`. For ~3 000 access opcodes per block, the per-proof cost is on the critical path. A binary SMT keyed by `H(item)` gives a uniform 256-level proof shape; non-inclusion follows automatically from a zero leaf on the deterministic path. Poseidon costs ~200 constraints per hash in standard arithmetization, versus ~150 000 for Keccak. Total verifier work per proof is therefore roughly 24× lower than a Keccak/MPT-based commitment, and the uniform shape avoids recursive/variable-depth verifier overhead. Since the WAM is a new piece of state regardless, choosing a ZK-friendly commitment for it does not break backwards compatibility with existing MPT-based state.
+A zkEVM prover charges every access opcode with one inclusion or non-inclusion proof against `WAM_ROOT`. For ~3 000 access opcodes per block, the per-proof cost is on the critical path. Two independent choices drive efficiency:
+
+- **SMT over MPT.** A binary SMT keyed by `SHA256(item)` gives a uniform 256-level proof shape and natural non-inclusion proofs (a zero leaf on the deterministic path). MPT proofs are variable-depth and require a divergent-sibling step for non-inclusion, producing non-uniform circuit shapes that need recursive verification — much more expensive in practice even when the raw constraint count looks similar.
+- **SHA-256 over Keccak-256.** Both are available on Ethereum L1, but SHA-256 costs ~25 k constraints per hash in standard R1CS/BN254 arithmetization (and 5–10 k in lookup-based proof systems), versus ~150 k for Keccak. SHA-256 is also the hash used by beacon-chain SSZ Merkleization, so the choice fits an existing Ethereum precedent. A future EIP that introduces a ZK-friendly hash precompile (e.g., Poseidon) can replace `SHA256` without changing the tree structure.
+
+The WAM is a new piece of state, so adopting a ZK-friendly commitment for it does not break backwards compatibility with the existing MPT/Keccak state trie.
 
 ### No new gas constants
 
