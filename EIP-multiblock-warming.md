@@ -13,13 +13,17 @@ requires: 2929, 2930, 7928
 
 ## Abstract
 
-A new chain-state structure, the **warm-access multiset (WAM)**, maps each accessed item (an account address or an `(address, storage_key)` pair) to the number of the last 256 blocks whose Block Access List (BAL, per [EIP-7928](./eip-7928.md)) contains it. Items present in the WAM at the start of a block are treated as already-accessed for [EIP-2929](./eip-2929.md) pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes pay 100 instead of 2100. The WAM is updated incrementally each block by incrementing the count of every item in the new BAL and decrementing the count of every item in the BAL leaving the window, so the per-block update is `O(|BAL|)`.
+About **17 %** of an Ethereum mainnet block's gas pays the [EIP-2929](./eip-2929.md) cold-access surcharge: the extra ~2100 gas for the first touch of a storage slot and ~2600 for the first touch of an account address in a transaction. About **79 %** of those first-touch items were also touched in the previous 256 blocks, so the surcharge is recoverable: a 256-block warming horizon saves **~14 %** of total block gas at the median.
+
+This EIP defines a chain-state **warm-access multiset (WAM)** that records every item (an account address or `(address, storage_key)` pair) present in the Block Access Lists (BALs, [EIP-7928](./eip-7928.md)) of the last 256 blocks. Items in the WAM at the start of a block are treated as already-accessed for [EIP-2929](./eip-2929.md) pricing in every transaction of that block. The WAM is maintained incrementally each block: `+1` for every item in the new BAL, `-1` for every item in the BAL leaving the window. Membership tests are `O(1)`; per-block updates are `O(|BAL|)`.
 
 ## Motivation
 
-[EIP-2929](./eip-2929.md)'s access list resets at every transaction. The same `(contract, slot)` pairs and contract addresses pay the cold cost thousands of times per day across blocks. Empirical analysis of mainnet blocks shows ~10 % per-block gas savings at an 8-block (~96 s) warming horizon and ~14 % at 256 blocks (~51 min), against a per-block-median upper bound of 18.4 %. A 256-block window captures ~76 % of the recoverable amount at ~10 MB of state.
+[EIP-2929](./eip-2929.md) charges a cold-access surcharge of ~2100 gas per storage slot and ~2600 per account address the first time each transaction touches a given item, then resets the list at every new transaction. On Ethereum mainnet this surcharge accounts for a median of **17 % of every block's gas**: gas paid only to mark state as known to the EVM.
 
-A naive implementation (store the raw BALs, recompute their union each block) walks ~3 000 items per block of work. The multiset-with-refcounts representation specified here makes membership testing O(1) and per-block update O(|BAL_in| + |BAL_out|), independent of the window size.
+Across blocks, the same items are touched repeatedly. Empirical measurement on 5731 mainnet blocks shows that **79 % of cold-charged items in a typical block were also touched in the previous 256 blocks** (~51 minutes). Treating those items as already-accessed at the start of the block would eliminate the surcharge they paid, saving **~14 % of total block gas at the median**.
+
+A naive implementation (store the 256 most recent raw BALs, recompute their union per query) makes membership tests `O(256)`. The refcounted-multiset representation specified here gives `O(1)` membership tests and `O(|BAL|)` per-block updates, independent of the window size.
 
 ## Specification
 
@@ -131,15 +135,17 @@ Median per-block trade-off on a 5 731-block mainnet sample:
 
 | W | Time back | % cold ops flipped | % gas saved | WAM (MB) |
 |---:|---:|---:|---:|---:|
-| 8 | 96 s | 57 % | 10.1 % | 0.6 |
-| 32 | 6.4 min | 68 % | 12.1 % | 2 |
-| 128 | 25.6 min | 77 % | 13.5 % | 6 |
-| **256** | **51 min** | **80 %** | **14.1 %** | **10** |
-| 512 | 102 min | 82 % | 14.4 % | 18 |
-| 1024 | 3.4 h | 83 % | 14.7 % | 31 |
-| Asymptote | n/a | 100 % | 18.4 % | n/a |
+| 8 | 96 s | 60 % | 10.1 % | 0.6 |
+| 32 | 6.4 min | 70 % | 12.0 % | 2 |
+| 128 | 25.6 min | 78 % | 13.3 % | 6 |
+| **256** | **51 min** | **81 %** | **13.9 %** | **10** |
+| 512 | 102 min | 84 % | 14.3 % | 18 |
+| 1024 | 3.4 h | 85 % | 14.5 % | 31 |
+| Asymptote | n/a | 100 % | 17.5 % | n/a |
 
-W=256 captures ~76 % of the gas asymptote at ~10 MB of WAM state and sits 4× past the finality horizon. The next doubling (W=512) triples the marginal cost per added warm conversion for only ~2 percentage points more, so W=256 is at the inflection of the cost-benefit curve.
+W=256 captures ~79 % of the gas asymptote at ~10 MB of WAM state and sits 4× past the finality horizon. The next doubling (W=512) triples the marginal cost per added warm conversion for only ~0.4 percentage points more, so W=256 is at the inflection of the cost-benefit curve.
+
+Implementations that prioritise memory can pick W=8 (~0.6 MB, 60 % ops), W=16 (~1 MB, 65 %), or W=32 (~2 MB, 70 %, also one epoch). Implementations with memory to spare can pick W=512 (~18 MB, 84 %); past that the cost-benefit deteriorates sharply.
 
 ### Reuse of EIP-7928 BALs
 
