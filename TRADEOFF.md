@@ -50,11 +50,11 @@ The "items per added hit" is essentially the marginal cost of warming one more o
 
 ## Plots
 
-![WAM size and hits per block vs W](plot_wam_hits.png)
+![WAM size and hits per block vs W](plots/plot_wam_hits.png)
 
 Left axis (red, log): the WAM grows nearly linearly in log-log, with a slope around 0.85 (items ∝ W^0.85). Right axis (blue): hits saturate visibly past W ≈ 128.
 
-![Efficiency vs W](plot_efficiency.png)
+![Efficiency vs W](plots/plot_efficiency.png)
 
 Hits per million items in the WAM. Clean power-law decline of ~3 decades from W=1 to W=2048. Each doubling of W costs ~70 % efficiency in this metric.
 

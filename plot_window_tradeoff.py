@@ -85,6 +85,6 @@ def main(in_path, out_dir):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--in_path", default="data/window_tradeoff.parquet")
-    p.add_argument("--out_dir", default=".")
+    p.add_argument("--out_dir", default="plots")
     args = p.parse_args()
     main(args.in_path, args.out_dir)
