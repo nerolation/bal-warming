@@ -70,6 +70,20 @@ The order is fixed (`ADD` before `DEL`) so that items present in both — i.e., 
 
 Each block transition mutates the WAM in place; nodes do not need to store any per-block snapshot of the WAM. They do need access to historical `items(BAL(N))` for `N ≥ B − 1 − WARMING_WINDOW` to perform the `DEL` step; EIP-7928 already provides this.
 
+### Commitment
+
+The WAM is committed to by a binary Sparse Merkle Tree (SMT) of depth 256:
+
+```
+leaf_key(item) = H(serialize(item))           # 256-bit
+leaf_value     = u32 counter (0 if absent)
+WAM_ROOT       = SMT root over { leaf_key → leaf_value }
+```
+
+`H` is a ZK-friendly hash (Poseidon-128) used for both leaf keys and node hashing. `WAM_ROOT` is included in the block header as a new field. The per-block transition above updates the SMT incrementally: one leaf update per item in `ADD ∪ DEL`, yielding the new root. The order does not affect the final root because SMT structure is determined by leaf keys, not by insertion order.
+
+An inclusion proof (item is warm, with its counter) or non-inclusion proof (item is absent) consists of 256 sibling hashes — a fixed shape independent of `|WAM|`.
+
 ### Access-list initialization in transactions
 
 At the start of every transaction in block `B`, the per-tx access list is initialized as today (precompiles, `tx.from`, `tx.to`, coinbase per EIP-3651, EIP-2930 access list, EIP-7702 authority list) **plus** every item with `WAM[item] > 0`.
@@ -123,6 +137,10 @@ Each doubling past W=1024 adds < 0.3 percentage points. 7 200 (24 h) is the smal
 
 EIP-7928 introduces a canonical Block Access List committed to the block header. This proposal reuses that artifact as the per-block "add" set and (via history lookup) as the "delete" set. Without EIP-7928, multi-block warming requires its own access-list commitment mechanism, which is out of scope here.
 
+### Binary SMT with Poseidon, not MPT with Keccak
+
+A zkEVM prover charges every access opcode with one inclusion or non-inclusion proof against `WAM_ROOT`. For ~3 000 access opcodes per block, the per-proof cost is on the critical path. A binary SMT keyed by `H(item)` gives a uniform 256-level proof shape; non-inclusion follows automatically from a zero leaf on the deterministic path. Poseidon costs ~200 constraints per hash in standard arithmetization, versus ~150 000 for Keccak. Total verifier work per proof is therefore roughly 24× lower than a Keccak/MPT-based commitment, and the uniform shape avoids recursive/variable-depth verifier overhead. Since the WAM is a new piece of state regardless, choosing a ZK-friendly commitment for it does not break backwards compatibility with existing MPT-based state.
+
 ### No new gas constants
 
 Reusing existing warm/cold costs keeps the gas table small and lets gas estimation, fuzzers, and compilers continue to work without modification.
@@ -131,7 +149,9 @@ Reusing existing warm/cold costs keeps the gas table small and lets gas estimati
 
 Forward-only: every existing transaction pays the same or less gas, never more. No transaction becomes invalid. EIP-2930 transaction access lists remain valid and are still pre-warmed (idempotent overlap with the WAM).
 
-**State cost.** From the 2 000-block sample, ~3 000 distinct items per block enter the WAM, with substantial overlap across blocks. Empirical multiset size after a 7 200-block window: estimated 5 – 10 million distinct items. At 60 bytes per entry (20-byte address + optional 32-byte slot + 4-byte counter, packed) the WAM occupies roughly 300 – 700 MB of node state. This is comparable to the EIP-7928 BAL history that nodes must already retain.
+**State cost.** From the 2 000-block sample, ~3 000 distinct items per block enter the WAM, with substantial overlap across blocks. Empirical multiset size after a 7 200-block window: estimated 5 – 10 million distinct items. At 60 bytes per entry (20-byte address + optional 32-byte slot + 4-byte counter, packed) the WAM occupies roughly 300 – 700 MB of node state, plus the SMT internal nodes (~32 bytes per occupied path level, dominated by the leaf count). This is comparable to the EIP-7928 BAL history that nodes must already retain.
+
+**Block header.** A single new 32-byte field `wam_root` is added to the block header. Validators verify it matches the WAM SMT root after applying the per-block transition.
 
 **Worst-case state.** Bounded by `WARMING_WINDOW × max_distinct_items_per_block`, which is in turn bounded by the block gas limit. A pathological block of nothing but unique cold storage accesses contributes ~16 000 items (at 21 000 gas per item ceiling); the worst-case WAM is therefore ~115 million items ≈ 7 GB. This is an upper bound that no realistic mainnet workload approaches.
 
