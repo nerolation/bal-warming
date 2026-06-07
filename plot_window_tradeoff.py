@@ -60,14 +60,18 @@ def main(out_dir):
     ax.legend(loc="center", bbox_to_anchor=(0.5, 0.42),
               framealpha=0.92, fontsize=9)
 
-    # Annotate a few key Ws
-    for w in (8, 32, 128, 1024):
+    # Annotate key Ws. In the saturated right region the curve barely separates the
+    # labels, so stagger 256/512 below the line at different depths and 128/1024 above.
+    y_offsets = {8: +4, 32: +4, 128: +4, 256: -12, 512: -25, 1024: +4}
+    for w in (8, 32, 128, 256, 512, 1024):
         if w in ws:
             i = ws.index(w)
+            y_off = y_offsets[w]
             ax.annotate(f"W={w}\n{pct_ops[i]:.0f}% ops, {pct_gas[i]:.1f}% gas",
-                         xy=(w, pct_ops[i]), xytext=(w, pct_ops[i] + 4),
+                         xy=(w, pct_ops[i]), xytext=(w, pct_ops[i] + y_off),
                          ha="center", fontsize=9,
-                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.9))
+                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.9),
+                         arrowprops=dict(arrowstyle="-", color="gray", alpha=0.4, lw=0.6) if y_off < 0 else None)
     fig.tight_layout()
     out1 = os.path.join(out_dir, "plot_saving_curve.png")
     fig.savefig(out1, dpi=130)
@@ -84,7 +88,7 @@ def main(out_dir):
     ax.grid(True, which="both", alpha=0.3)
     ax.set_xlim(ws_cost[0] / 1.3, ws_cost[-1] * 1.3)
 
-    for w in (8, 32, 128, 1024):
+    for w in (8, 32, 128, 256, 512, 1024):
         if w in ws_cost:
             i = ws_cost.index(w)
             ax.annotate(f"W={w}: {state_mb[i]:.1f} MB",
