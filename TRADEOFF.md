@@ -50,13 +50,13 @@ The "items per added hit" is essentially the marginal cost of warming one more o
 
 ## Plots
 
-![WAM size and hits per block vs W](plots/plot_wam_hits.png)
+![Saving curve](plots/plot_saving_curve.png)
 
-Left axis (red, log): the WAM grows nearly linearly in log-log, with a slope around 0.85 (items ∝ W^0.85). Right axis (blue): hits saturate visibly past W ≈ 128.
+Blue: percentage of cold opcodes that would flip to warm. Green: percentage of block gas saved. They diverge because SSTORE's gas differential (2100) is lower than CALL/EXT*'s (2500), so flipping many SSTOREs counts in the op curve but contributes less to the gas curve. Both saturate visibly past W ≈ 128, well below the gas asymptote of 18.4 %.
 
-![Efficiency vs W](plots/plot_efficiency.png)
+![State cost](plots/plot_state_cost.png)
 
-Hits per million items in the WAM. Clean power-law decline of ~3 decades from W=1 to W=2048. Each doubling of W costs ~70 % efficiency in this metric.
+WAM held in memory (megabytes). Flat through W ≈ 100 (under 6 MB), grows quickly past W = 500. W = 1024 already costs ~30 MB. Extrapolated to W = 7200: ~180 MB.
 
 ## Interpretation
 

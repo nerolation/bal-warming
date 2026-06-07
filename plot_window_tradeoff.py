@@ -1,10 +1,13 @@
 """
-Plot the W-vs-(state, hits, efficiency) trade-off as two PNGs.
+Plot W-vs-(benefit, cost) trade-off as simple percentage curves.
 
-Inputs: data/window_tradeoff.parquet (produced by window_tradeoff.py)
-Outputs:
-  data/plot_wam_hits.png       — dual-axis: WAM size and hits per block vs W
-  data/plot_efficiency.png     — hits per million WAM items vs W
+Inputs:
+  data/window_tradeoff.parquet     (cost side: WAM size)
+  data/per_block_savings.parquet   (benefit side: gas % and op-count %)
+
+Outputs (in plots/):
+  plot_saving_curve.png   - % gas saved and % cold ops flipped vs W
+  plot_state_cost.png     - state held in memory (MB) vs W
 """
 import argparse
 import os
@@ -12,79 +15,87 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 
-def main(in_path, out_dir):
-    df = pd.read_parquet(in_path).sort_values("W").reset_index(drop=True)
-    # Trim biased tail rows (different fair-subset populations).
-    # Keep W up to where fair subset is at least 50% of dataset.
-    n_total_max = df["n_fair_blocks"].max()
-    df = df[df["n_fair_blocks"] >= 0.5 * n_total_max].copy()
-    df["wam_mb"] = df["wam_size_mean"] * 60 / 1e6  # 60 bytes per item
+def main(out_dir):
+    tradeoff = pd.read_parquet("data/window_tradeoff.parquet").sort_values("W").reset_index(drop=True)
+    pbs = pd.read_parquet("data/per_block_savings.parquet").sort_values("block_number").reset_index(drop=True)
 
-    # === Plot 1: dual-axis benefit vs cost ===
-    fig, ax1 = plt.subplots(figsize=(9, 5))
-    ax2 = ax1.twinx()
-    ax1.plot(df["W"], df["wam_size_mean"], "o-", color="#d62728", label="WAM size (items)")
-    ax1.set_xscale("log")
-    ax1.set_yscale("log")
-    ax1.set_xlabel("Window size W (blocks, log)")
-    ax1.set_ylabel("WAM size (distinct items, log)", color="#d62728")
-    ax1.tick_params(axis="y", labelcolor="#d62728")
-    ax1.grid(True, which="both", alpha=0.3)
+    # Use the same fair-comparison subset across all W: blocks with full Wmax-block lookback.
+    first_block = pbs["block_number"].min()
+    Wmax = max(int(c[len("saving_W"):]) for c in pbs.columns if c.startswith("saving_W"))
+    fair = pbs[pbs["block_number"] - first_block >= Wmax]
+    ws = sorted(int(c[len("saving_W"):]) for c in pbs.columns if c.startswith("saving_W") and int(c[len("saving_W"):]) >= 1)
 
-    ax2.plot(df["W"], df["hits_mean"], "s-", color="#1f77b4", label="Hits per block")
-    ax2.set_ylabel("Cold → warm conversions per block", color="#1f77b4")
-    ax2.tick_params(axis="y", labelcolor="#1f77b4")
+    # Median percentages on the fair subset.
+    pct_gas = [fair[f"pct_saving_W{w}"].median() for w in ws]
+    pct_ops = [fair[f"hit_rate_W{w}"].median() * 100 for w in ws]
+    asymptote_gas = fair["pct_max_saving"].median()
 
-    # Knee annotations
-    for w in (8, 32, 128):
-        if w in df["W"].values:
-            r = df[df["W"] == w].iloc[0]
-            ax1.axvline(w, color="gray", linestyle="--", alpha=0.3)
-            ax2.annotate(f"W={w}\n{int(r.hits_mean)} hits\n{int(r.wam_size_mean):,} items",
-                         xy=(w, r.hits_mean),
-                         xytext=(w * 1.1, r.hits_mean - 200),
-                         fontsize=8, color="black",
-                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.9))
+    # State cost from tradeoff parquet (mean across fair subset already computed there).
+    cost_by_w = dict(zip(tradeoff["W"], tradeoff["wam_size_mean"]))
+    ws_cost = [w for w in ws if w in cost_by_w]
+    state_mb = [cost_by_w[w] * 60 / 1e6 for w in ws_cost]  # 60 B per entry
 
-    ax1.set_title("Benefit vs cost: hits per block (right) vs WAM size (left) as W grows")
-    fig.tight_layout()
-    out1 = os.path.join(out_dir, "plot_wam_hits.png")
-    fig.savefig(out1, dpi=130)
-    print(f"wrote {out1}")
-    plt.close(fig)
+    os.makedirs(out_dir, exist_ok=True)
 
-    # === Plot 2: efficiency curve ===
+    # ===== Plot 1: benefit curve =====
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(df["W"], df["hits_per_million_wam"], "o-", color="#2ca02c")
+    ax.plot(ws, pct_ops, "o-", color="#1f77b4", linewidth=2, label="% of cold opcodes flipped to warm")
+    ax.plot(ws, pct_gas, "s-", color="#2ca02c", linewidth=2, label="% of block gas saved")
+    ax.axhline(asymptote_gas, color="gray", linestyle="--", alpha=0.6,
+               label=f"Asymptote: {asymptote_gas:.1f}% gas (if everything warm)")
     ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("Window size W (blocks, log)")
-    ax.set_ylabel("Hits per million items held in WAM (log)")
+    ax.set_xlabel("Window size W (blocks, log scale)")
+    ax.set_ylabel("Per-block median (%)")
+    ax.set_title("Multi-block warming: benefit vs window size")
     ax.grid(True, which="both", alpha=0.3)
-    ax.set_title("Efficiency drops ~500× from W=1 to W=4096")
+    ax.legend(loc="lower right")
+    ax.set_xlim(ws[0] / 1.3, ws[-1] * 1.3)
+    ax.set_ylim(0, max(asymptote_gas + 5, max(pct_ops) + 5))
 
-    # Annotate the knee
-    for w in (8, 64, 256, 1024):
-        if w in df["W"].values:
-            r = df[df["W"] == w].iloc[0]
-            ax.annotate(f"W={w}: {int(r.hits_per_million_wam):,}",
-                         xy=(w, r.hits_per_million_wam),
-                         xytext=(w * 1.2, r.hits_per_million_wam * 1.2),
-                         fontsize=9,
-                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+    # Annotate a few key Ws
+    for w in (8, 32, 128, 1024):
+        if w in ws:
+            i = ws.index(w)
+            ax.annotate(f"W={w}\n{pct_ops[i]:.0f}% ops, {pct_gas[i]:.1f}% gas",
+                         xy=(w, pct_ops[i]), xytext=(w, pct_ops[i] + 4),
+                         ha="center", fontsize=9,
+                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.9))
     fig.tight_layout()
-    out2 = os.path.join(out_dir, "plot_efficiency.png")
-    fig.savefig(out2, dpi=130)
-    print(f"wrote {out2}")
+    out1 = os.path.join(out_dir, "plot_saving_curve.png")
+    fig.savefig(out1, dpi=130)
     plt.close(fig)
+    print(f"wrote {out1}")
+
+    # ===== Plot 2: state cost =====
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(ws_cost, state_mb, "o-", color="#d62728", linewidth=2)
+    ax.set_xscale("log")
+    ax.set_xlabel("Window size W (blocks, log scale)")
+    ax.set_ylabel("WAM state in memory (MB)")
+    ax.set_title("Multi-block warming: in-memory state cost vs window size")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.set_xlim(ws_cost[0] / 1.3, ws_cost[-1] * 1.3)
+
+    for w in (8, 32, 128, 1024):
+        if w in ws_cost:
+            i = ws_cost.index(w)
+            ax.annotate(f"W={w}: {state_mb[i]:.1f} MB",
+                         xy=(w, state_mb[i]), xytext=(w * 1.2, state_mb[i] + max(state_mb) * 0.05),
+                         fontsize=9,
+                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.9))
+    fig.tight_layout()
+    out2 = os.path.join(out_dir, "plot_state_cost.png")
+    fig.savefig(out2, dpi=130)
+    plt.close(fig)
+    print(f"wrote {out2}")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--in_path", default="data/window_tradeoff.parquet")
     p.add_argument("--out_dir", default="plots")
     args = p.parse_args()
-    main(args.in_path, args.out_dir)
+    main(args.out_dir)
