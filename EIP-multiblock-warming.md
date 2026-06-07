@@ -1,7 +1,7 @@
 ---
 eip: <to be assigned>
-title: Multi-block warming via Block Access Lists
-description: Pre-warm the EIP-2929 access list at the start of each block using the union of Block Access Lists from the previous 7200 blocks (~24 hours).
+title: Multi-block warming via a rolling warm-access multiset
+description: Maintain a rolling 7200-block (~24 h) warm-access multiset derived from Block Access Lists; treat its items as already-accessed at the start of every transaction.
 author: <TBD>
 discussions-to: <TBD>
 status: Draft
@@ -13,56 +13,99 @@ requires: 2929, 2930, 7928
 
 ## Abstract
 
-Pre-warm the EIP-2929 access list at the start of each block with the union of Block Access Lists (BALs, per EIP-7928) from the most recent 7200 blocks (~24 hours). Storage slots and account addresses that appear in this rolling union pay the warm access cost (100 gas) on first touch instead of the cold cost (2100 for storage, 2600 for accounts).
+Maintain a single chain-state structure, the **warm-access multiset (WAM)**, mapping each `(address, slot?)` item to the number of the last 7200 blocks whose Block Access List (BAL, per EIP-7928) contains that item. Items present in the WAM at the start of a block are treated as already-accessed for EIP-2929 pricing inside every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes pay 100 instead of 2100. The WAM is updated incrementally each block (+1 for items in the new BAL, −1 for items in the BAL aging out of the window), so additions and removals are O(|BAL|) per block.
 
 ## Motivation
 
-EIP-2929's access list resets at every transaction. The same `(contract, slot)` and contract addresses are paid for as cold thousands of times per day across blocks. Empirical analysis of 2 000 mainnet blocks (24 988 201 – 24 990 200, ~6.7 h) shows that 80 % of cold-access gas is recoverable with a 1 024-block (≈ 3.4 h) warming horizon. Extending to 24 h captures essentially all of the recoverable amount: median per-block savings of ~16–18 % of `gasUsed`, with the bulk of the win at DELEGATECALL / STATICCALL / EXTCODECOPY targets and high-traffic SLOAD slots (proxies, routers, stablecoins).
+EIP-2929's access list resets at every transaction. The same `(contract, slot)` pairs and contract addresses pay the cold cost thousands of times per day across blocks. Empirical analysis of 2 000 mainnet blocks shows ~10 % per-block gas savings already at a 8-block (~96 s) warming horizon, ~15 % at 1024 blocks (~3.4 h), and a per-block-median upper bound of 18.4 %. A 24-hour window (7200 blocks) is well clear of the finality horizon and captures essentially the full recoverable amount.
+
+A naive implementation (store 7200 raw BALs, recompute their union each block) is operationally expensive: every block touches ~3 000 items and the union recomputation has to walk all of them. The multiset-with-refcounts representation specified here makes membership testing O(1) and per-block update O(|BAL_in| + |BAL_out|), independent of the window size.
 
 ## Specification
 
-Let `B` be the block being executed and `BAL(N)` be the Block Access List of block `N` as defined in EIP-7928.
-
-### Pre-warmed sets
-
-Define the warm carry sets for `B` as:
+### Constants
 
 ```
-warm_accounts(B) = ⋃ { addresses in BAL(N) : max(0, B−7200) ≤ N < B }
-warm_slots(B)    = ⋃ { (addr, slot) pairs in BAL(N) : max(0, B−7200) ≤ N < B }
+WARMING_WINDOW = 7200          # blocks (~24 h at 12 s/slot)
 ```
 
-The window size is `WARMING_WINDOW = 7200` blocks (≈ 24 hours at 12 s slot time).
+### Item type
 
-### Access list initialization
+An item is one of:
 
-At the start of every transaction in `B`, the per-tx access list is initialized as today (precompiles, `tx.from`, `tx.to`, coinbase per EIP-3651, EIP-2930 access list, EIP-7702 authority list) **plus**:
+- `Account(addr)` — a 20-byte Ethereum address;
+- `Slot(addr, key)` — a 20-byte address paired with a 32-byte storage key.
 
-- every address in `warm_accounts(B)` is treated as already-accessed for account-access opcodes;
-- every `(addr, slot)` in `warm_slots(B)` is treated as already-accessed for storage-access opcodes.
+The set of items contributed by block `N` is `items(BAL(N))`, defined as the deduplicated union of every address and `(address, slot)` pair appearing in `BAL(N)` (EIP-7928).
+
+### State: the warm-access multiset
+
+A single piece of chain-derived state is added:
+
+```
+WAM : Item -> u32
+```
+
+Items not present in the map are treated as having count 0.
+
+**An item is *warm* iff `WAM[item] > 0`.**
+
+### Per-block transition
+
+Before transaction execution in block `B`:
+
+```
+ADD = items(BAL(B − 1))                       # the most recently sealed BAL
+DEL = items(BAL(B − 1 − WARMING_WINDOW))      # the BAL aging out; empty if B ≤ WARMING_WINDOW
+
+for item in ADD:
+    WAM[item] += 1
+for item in DEL:
+    WAM[item] -= 1
+    if WAM[item] == 0:
+        delete WAM[item]
+```
+
+The order is fixed (`ADD` before `DEL`) so that items present in both — i.e., items also touched by the just-aged-out block and by the newest one — do not transiently drop to 0 between the two operations. The final `WAM` is the same regardless of order, but the transient invariant simplifies proofs.
+
+Each block transition mutates the WAM in place; nodes do not need to store any per-block snapshot of the WAM. They do need access to historical `items(BAL(N))` for `N ≥ B − 1 − WARMING_WINDOW` to perform the `DEL` step; EIP-7928 already provides this.
+
+### Access-list initialization in transactions
+
+At the start of every transaction in block `B`, the per-tx access list is initialized as today (precompiles, `tx.from`, `tx.to`, coinbase per EIP-3651, EIP-2930 access list, EIP-7702 authority list) **plus** every item with `WAM[item] > 0`.
 
 ### Pricing
 
-No new gas constants are introduced. The pricing rules of EIP-2929 are reused unchanged; the *only* difference is which entries are pre-loaded into the access list.
+No new gas constants. For every opcode that consults the access list:
 
-For an opcode that consults the access list:
-
-- if its operand is already in the access list (per the initialization above or per intra-tx accumulation), it pays the warm cost: `WARM_STORAGE_READ_COST = 100` for storage, `WARM_ACCOUNT_ACCESS_COST = 100` for accounts;
-- otherwise, the cold cost: `COLD_SLOAD_COST = 2100` for storage, `COLD_ACCOUNT_ACCESS_COST = 2600` for accounts.
+- if the operand is `Account(target)` or `Slot(executing_contract, key)` and the item is warm (either in the WAM or already added during this tx), it pays the warm cost (`100` gas for both account and storage);
+- otherwise, the cold cost (`2600` for accounts, `2100` for storage). The item is then added to the per-tx access list as in EIP-2929.
 
 ### Revert semantics
 
-Intra-tx revert continues to behave as in EIP-2929: access-list entries added inside a reverted sub-call are removed, except that entries originating from `warm_accounts(B)` / `warm_slots(B)` are never removed (they were not added by this transaction).
+Intra-tx revert behaves as in EIP-2929: entries added to the per-tx access list inside a reverted sub-call are removed. The WAM is not modified by transaction execution and is therefore unaffected by transaction revert. The WAM only changes at block boundaries via the transition above.
 
 ### Genesis and activation
 
-For the first 7200 blocks after activation, the union is taken over `[activation_block, B−1]` (the window simply contains fewer than 7200 blocks). After block `activation_block + 7200` the window is always full size.
+For the first `WARMING_WINDOW` blocks after activation, `DEL` is empty: there is no aged-out BAL yet. The WAM grows monotonically until block `activation_block + WARMING_WINDOW`, after which steady-state churn begins.
 
 ## Rationale
 
-### Why 7200 blocks (1 day)
+### Why a refcounted multiset
 
-Saving rate vs warming window, from the 2 000-block mainnet sample, median per-block percentage of `gasUsed`:
+The semantic content of multi-block warming is a sliding-window union of BAL items. The two natural representations are:
+
+| Representation | Membership test | Per-block update | Recompute on reorg |
+|---|---|---|---|
+| Store 7200 raw BALs, recompute union per query | O(7200) lookups | O(1) — just shift the ring | O(1) |
+| Store 7200 raw BALs, materialize union as a set | O(1) | O(union recompute) — expensive | O(union recompute) |
+| **Refcounted multiset (this EIP)** | **O(1)** | **O(\|BAL_in\| + \|BAL_out\|)** | **O(WARMING_WINDOW · avg \|BAL\|)** |
+
+The multiset wins on both hot paths (membership during tx execution, and steady-state per-block update). Reorg recomputation is the same cost as full reconstruction in any representation.
+
+### Why 7200 blocks
+
+Saving rate vs warming window, from a 2 000-block mainnet sample (median per-block percentage of `gasUsed`):
 
 | W | Time back | Median saving | % of cold gas eliminated |
 |---:|---:|---:|---:|
@@ -74,54 +117,56 @@ Saving rate vs warming window, from the 2 000-block mainnet sample, median per-b
 | 1024 | 3.4 h | 15.2 % | 80.4 % |
 | Asymptote | – | 18.4 % | 100 % |
 
-Each doubling of `W` past 1024 adds < 0.3 pp. Extrapolating the saturation trend, `W = 7200` recovers ≥ 95 % of the asymptote (~17–18 % median saving). A 24-hour window aligns naturally with operational cycles (snapshot rotation, mempool window, oracle-update cadence) and is well beyond the finality horizon (~12.8 min for two epochs), eliminating reorg complications.
-
-### Why not larger than 7200
-
-Marginal gain past 24 h is below the precision of the measurement (< 0.5 pp). The state cost of the rolling union grows roughly linearly with the window size, with no compensating benefit.
+Each doubling past W=1024 adds < 0.3 percentage points. 7 200 (24 h) is the smallest natural cadence that recovers ≥ 95 % of the asymptote while remaining well clear of the finality horizon (~12.8 min for two epochs), so reorgs cannot disturb the bulk of the window.
 
 ### Reuse of EIP-7928 BALs
 
-EIP-7928 introduces a canonical Block Access List committed to the block header. This proposal consumes that same artifact unchanged. Without EIP-7928 the warm sets are not part of consensus and stateless clients cannot verify gas charges; this EIP requires 7928 as a prerequisite.
+EIP-7928 introduces a canonical Block Access List committed to the block header. This proposal reuses that artifact as the per-block "add" set and (via history lookup) as the "delete" set. Without EIP-7928, multi-block warming requires its own access-list commitment mechanism, which is out of scope here.
 
 ### No new gas constants
 
-Reusing the existing warm/cold costs keeps the gas table small and lets all existing static analysis tooling (gas estimation, fuzzers, compilers) continue to work without modification.
+Reusing existing warm/cold costs keeps the gas table small and lets gas estimation, fuzzers, and compilers continue to work without modification.
 
 ## Backwards Compatibility
 
-Forward-only: every existing transaction pays the same or less gas. No transaction becomes invalid. EIP-2930 access lists supplied in transactions remain valid and are still pre-warmed (idempotent overlap with the multi-block warm set).
+Forward-only: every existing transaction pays the same or less gas, never more. No transaction becomes invalid. EIP-2930 transaction access lists remain valid and are still pre-warmed (idempotent overlap with the WAM).
 
-Block validation requires that nodes maintain the rolling 7200-block BAL union. From the 2 000-block sample, ~8 000 access ops per block produce ~3 000 unique `(addr, slot)` keys per block after dedup; ~16 M new keys per 7200-block day. At 52 bytes per key (20-byte address + 32-byte slot, no overhead) the rolling state is ~830 MB. Practical implementations should use a deduplicated structure (e.g., a per-block delta plus a global multiset with refcounts) so removal of expired blocks is O(|BAL|) per block.
+**State cost.** From the 2 000-block sample, ~3 000 distinct items per block enter the WAM, with substantial overlap across blocks. Empirical multiset size after a 7 200-block window: estimated 5 – 10 million distinct items. At 60 bytes per entry (20-byte address + optional 32-byte slot + 4-byte counter, packed) the WAM occupies roughly 300 – 700 MB of node state. This is comparable to the EIP-7928 BAL history that nodes must already retain.
+
+**Worst-case state.** Bounded by `WARMING_WINDOW × max_distinct_items_per_block`, which is in turn bounded by the block gas limit. A pathological block of nothing but unique cold storage accesses contributes ~16 000 items (at 21 000 gas per item ceiling); the worst-case WAM is therefore ~115 million items ≈ 7 GB. This is an upper bound that no realistic mainnet workload approaches.
 
 ## Test Cases
 
-To be added. The reference scenario is:
+To be added. Reference scenarios:
 
-1. Block `N−7200`: SLOAD on `(c, s)`. Cold (2100).
-2. Block `N−7199`: SLOAD on `(c, s)`. Cold (2100). (Window has only the activation block; no carry.)
-3. Block `N`: SLOAD on `(c, s)`. Warm (100), saving 2000 gas, because `(c, s) ∈ BAL(N−1)` (or any block in `[N−7200, N−1]`).
-4. Block `N+7201`: SLOAD on `(c, s)`, assuming `(c, s)` was last touched in block `N`. Cold (2100), because `N` is now outside the rolling window.
+1. Block `N−1`: SLOAD on `(c, s)`. Cold (2100). `items(BAL(N−1))` now contains `Slot(c, s)`.
+2. Block `N`: WAM has `Slot(c, s) → 1`. SLOAD on `(c, s)`. **Warm (100)**.
+3. Blocks `N+1 … N+7200`: SLOAD on `(c, s)` once per block. Each block: WAM count for `Slot(c, s)` is incremented to ≤ 7201 then decremented as the oldest contributing block ages out; the item remains warm throughout.
+4. Block `N+7201`: assume `(c, s)` was *not* touched in any block after `N`. The transition adds `items(BAL(N+7200))` (which doesn't include `(c, s)`) and removes `items(BAL(N))` (which does). `WAM[Slot(c, s)]` drops to 0 and is deleted. SLOAD on `(c, s)` in block `N+7201`: **Cold (2100)**.
 
 ## Reference Implementation
 
-A non-consensus reference implementation that reads EIP-7928 BALs from chain history and computes the warm sets per block is available alongside the empirical analysis at https://github.com/nerolation/bal-warming.
+A non-consensus reference implementation (parser, per-block extraction, savings analysis) is available at https://github.com/nerolation/bal-warming.
 
 ## Security Considerations
 
 ### State growth and DoS
 
-A malicious actor could attempt to inflate the warm set by accessing many distinct `(address, slot)` pairs cheaply (one per tx, paying the cold price once). The cost per inflated entry is at least 2 100 gas — equivalent to the price they'd pay anyway under EIP-2929. The amplification factor for the attacker is at most `7200 × (saving_recipient / cost_attacker)`, but the saving only goes to *legitimate* repeat accessors of the same key; an attacker cannot redirect savings to themselves. Net: the cost-benefit is unfavorable for an attacker.
+An attacker who tries to inflate the WAM with junk items still has to pay the EIP-2929 cold-access cost (≥ 2100 gas) for each new item, exactly the cost they would pay today. The amplification potential is bounded: an inflated item provides a 2000–2500 gas saving only to *later* legitimate accessors of that exact same item. The attacker cannot redirect that saving to themselves. There is no economic incentive to inflate.
 
-State growth at the implementation layer is bounded by `7200 × max(BAL_per_block)`, which is in turn bounded by the block gas limit. Worst case (full blocks of unique-key cold accesses) is ~830 MB per 24-hour rolling window.
+### Memory pressure
+
+At 300–700 MB the WAM is comparable to other long-lived caches that nodes already maintain. The data structure is simple enough (hash map of items to small counters) that practical implementations can hold it in memory; cold-tier storage is not required.
 
 ### Reorg behavior
 
-If a block within the 7200-window is reorg'd, the warm set must be recomputed for the new canonical chain. Standard chain-reorg handling already re-executes transactions in the new chain; gas charges are recomputed naturally. No explicit refund machinery is required.
+If a block within the 7200-window is reorg'd, the WAM along the reorg'd chain diverges from the WAM along the new canonical chain. Reorgs are already handled by re-execution; the WAM transitions are deterministic functions of `BAL(N−1)` and `BAL(N−1−WARMING_WINDOW)`, so re-executing the new canonical chain rebuilds the correct WAM step-by-step. No explicit refund machinery is required.
+
+In practice, finality (~12.8 min for two epochs) bounds reorg depth to a tiny fraction of the warming window, so the recomputation cost is negligible.
 
 ### Light/stateless clients
 
-Clients that do not store BAL history cannot independently verify gas charges. They must either trust an EIP-7928-aware full node, or rely on the BAL commitment in the block header (per EIP-7928) plus a Merkle proof of inclusion for the keys consulted by the transactions they care about.
+The WAM is derived deterministically from EIP-7928 BAL history. Clients that maintain BAL history (or accept proofs against an EIP-7928 commitment) can independently verify whether any specific item is warm at any block height by replaying the transition. No new commitment in the block header is strictly required.
 
 ## Copyright
 
