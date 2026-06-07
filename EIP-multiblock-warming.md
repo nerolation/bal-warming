@@ -1,9 +1,9 @@
 ---
-eip: <to be assigned>
-title: Multi-block warming via a rolling warm-access multiset
-description: Maintain a rolling 256-block (~51 min) warm-access multiset derived from Block Access Lists; treat its items as already-accessed at the start of every transaction.
-author: <TBD>
-discussions-to: <TBD>
+eip: 9999
+title: Multi-block access list warming
+description: Pre-warm the per-transaction access list with items from the previous 256 block access lists
+author: Toni Wahrstätter (@nerolation)
+discussions-to: https://ethereum-magicians.org/t/eip-9999-multi-block-access-list-warming/0
 status: Draft
 type: Standards Track
 category: Core
@@ -13,15 +13,17 @@ requires: 2929, 2930, 7928
 
 ## Abstract
 
-A new chain-state structure, the **warm-access multiset (WAM)**, maps each `(address, slot?)` item to the number of the last 256 blocks whose Block Access List (BAL, per EIP-7928) contains that item. Items present in the WAM at the start of a block are treated as already-accessed for EIP-2929 pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes 100 instead of 2100. The WAM updates incrementally each block (+1 for items in the new BAL, −1 for items in the BAL aging out), so additions and removals are O(|BAL|) per block.
+A new chain-state structure, the **warm-access multiset (WAM)**, maps each `(address, slot?)` item to the number of the last 256 blocks whose Block Access List (BAL, per [EIP-7928](./eip-7928.md)) contains that item. Items present in the WAM at the start of a block are treated as already-accessed for [EIP-2929](./eip-2929.md) pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes 100 instead of 2100. The WAM updates incrementally each block (+1 for items in the new BAL, −1 for items in the BAL aging out), so additions and removals are O(|BAL|) per block.
 
 ## Motivation
 
-EIP-2929's access list resets at every transaction. The same `(contract, slot)` pairs and contract addresses pay the cold cost thousands of times per day across blocks. Empirical analysis of mainnet blocks shows ~10 % per-block gas savings at an 8-block (~96 s) warming horizon and ~14 % at 256 blocks (~51 min), against a per-block-median upper bound of 18.4 %. A 256-block window captures ~76 % of the recoverable amount at ~10 MB of state.
+[EIP-2929](./eip-2929.md)'s access list resets at every transaction. The same `(contract, slot)` pairs and contract addresses pay the cold cost thousands of times per day across blocks. Empirical analysis of mainnet blocks shows ~10 % per-block gas savings at an 8-block (~96 s) warming horizon and ~14 % at 256 blocks (~51 min), against a per-block-median upper bound of 18.4 %. A 256-block window captures ~76 % of the recoverable amount at ~10 MB of state.
 
 A naive implementation (store the raw BALs, recompute their union each block) walks ~3 000 items per block of work. The multiset-with-refcounts representation specified here makes membership testing O(1) and per-block update O(|BAL_in| + |BAL_out|), independent of the window size.
 
 ## Specification
+
+The key words "MUST", "MUST NOT", "SHOULD", and "MAY" in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
 
 ### Constants
 
@@ -36,7 +38,7 @@ An item is one of:
 - `Account(addr)`: a 20-byte Ethereum address;
 - `Slot(addr, key)`: a 20-byte address paired with a 32-byte storage key.
 
-`items(BAL(N))` is the deduplicated set of every address and `(address, slot)` pair in `BAL(N)` (EIP-7928).
+`items(BAL(N))` is the deduplicated set of every address and `(address, slot)` pair in `BAL(N)` ([EIP-7928](./eip-7928.md)).
 
 ### State: the warm-access multiset
 
@@ -66,7 +68,7 @@ for item in DEL:
 
 Order is fixed (`ADD` before `DEL`) so items present in both do not transiently drop to 0. The final `WAM` is order-independent; the fixed order simplifies proofs.
 
-The transition mutates the WAM in place; no per-block snapshot is required. Historical `items(BAL(N))` for `N ≥ B − 1 − WARMING_WINDOW` are needed for `DEL`, which EIP-7928 already provides.
+The transition mutates the WAM in place; no per-block snapshot is required. Historical `items(BAL(N))` for `N ≥ B − 1 − WARMING_WINDOW` are needed for `DEL`, which [EIP-7928](./eip-7928.md) already provides.
 
 ### Commitment
 
@@ -92,18 +94,18 @@ Inclusion or non-inclusion proofs consist of 256 sibling hashes (fixed shape, in
 
 ### Access-list initialization in transactions
 
-At the start of every transaction in block `B`, the per-tx access list is initialized as today (precompiles, `tx.from`, `tx.to`, coinbase per EIP-3651, EIP-2930 access list, EIP-7702 authority list) **plus** every item with `WAM[item] > 0`.
+At the start of every transaction in block `B`, the per-tx access list is initialized as today (precompiles, `tx.from`, `tx.to`, coinbase per [EIP-3651](./eip-3651.md), [EIP-2930](./eip-2930.md) access list, [EIP-7702](./eip-7702.md) authority list) **plus** every item with `WAM[item] > 0`.
 
 ### Pricing
 
 No new gas constants. For every opcode that consults the access list:
 
 - if the operand is `Account(target)` or `Slot(executing_contract, key)` and the item is warm (in the WAM or already added during this tx), it pays the warm cost (`100` gas for both account and storage);
-- otherwise, the cold cost (`2600` for accounts, `2100` for storage). The item is then added to the per-tx access list as in EIP-2929.
+- otherwise, the cold cost (`2600` for accounts, `2100` for storage). The item is then added to the per-tx access list as in [EIP-2929](./eip-2929.md).
 
 ### Revert semantics
 
-Intra-tx revert behaves as in EIP-2929: entries added to the per-tx access list inside a reverted sub-call are removed. The WAM only changes at block boundaries and is not affected by transaction revert.
+Intra-tx revert behaves as in [EIP-2929](./eip-2929.md): entries added to the per-tx access list inside a reverted sub-call are removed. The WAM only changes at block boundaries and is not affected by transaction revert.
 
 ### Genesis and activation
 
@@ -143,7 +145,7 @@ Implementations that prioritise memory can pick W=8 (~0.6 MB, 57 % ops), W=16 (~
 
 ### Reuse of EIP-7928 BALs
 
-EIP-7928 introduces a canonical Block Access List committed to the block header. This proposal reuses that artifact as the per-block "add" set and (via history lookup) as the "delete" set. Without EIP-7928, this EIP would need its own access-list commitment, which is out of scope.
+[EIP-7928](./eip-7928.md) introduces a canonical Block Access List committed to the block header. This proposal reuses that artifact as the per-block "add" set and (via history lookup) as the "delete" set. Without [EIP-7928](./eip-7928.md), this EIP would need its own access-list commitment, which is out of scope.
 
 ### Binary SMT (not MPT) and SHA-256 (not Keccak)
 
@@ -169,9 +171,9 @@ Reusing existing warm/cold costs keeps the gas table small and lets gas estimati
 
 ## Backwards Compatibility
 
-Forward-only: every existing transaction pays the same or less gas. No transaction becomes invalid. EIP-2930 access lists remain valid and are pre-warmed (idempotent overlap with the WAM).
+Forward-only: every existing transaction pays the same or less gas. No transaction becomes invalid. [EIP-2930](./eip-2930.md) access lists remain valid and are pre-warmed (idempotent overlap with the WAM).
 
-**State cost.** From a 5 731-block mainnet sample, ~3 000 distinct items per block enter the WAM with heavy overlap. Empirical WAM size at W=256: ~170 000 distinct items, ~10 MB at 60 bytes per entry, plus SMT internal nodes. Comparable to the EIP-7928 BAL history nodes already retain.
+**State cost.** From a 5 731-block mainnet sample, ~3 000 distinct items per block enter the WAM with heavy overlap. Empirical WAM size at W=256: ~170 000 distinct items, ~10 MB at 60 bytes per entry, plus SMT internal nodes. Comparable to the [EIP-7928](./eip-7928.md) BAL history nodes already retain.
 
 **Block header.** One new 32-byte field `wam_root`. Validators verify it matches the SMT root after the per-block transition.
 
@@ -185,10 +187,6 @@ To be added. Reference scenarios:
 2. Block `N`: WAM has `Slot(c, s) → 1`. SLOAD on `(c, s)`. **Warm (100)**.
 3. Blocks `N+1 … N+256`: SLOAD on `(c, s)` once per block. WAM count increments to ≤ 257 then decrements as the oldest contributing block ages out; the item stays warm.
 4. Block `N+257`: assume `(c, s)` was not touched after `N`. The transition adds `items(BAL(N+256))` (no `(c, s)`) and removes `items(BAL(N))` (contains `(c, s)`). `WAM[Slot(c, s)]` drops to 0 and is deleted. SLOAD on `(c, s)`: **Cold (2100)**.
-
-## Reference Implementation
-
-Non-consensus reference implementation (parser, per-block extraction, savings analysis): https://github.com/nerolation/bal-warming.
 
 ## Security Considerations
 
@@ -206,8 +204,8 @@ WAM transitions are deterministic functions of `BAL(N−1)` and `BAL(N−1−WAR
 
 ### Light/stateless clients
 
-The WAM is derived deterministically from EIP-7928 BAL history. Light clients can either compute `WAM_ROOT` from BAL history or verify (non-)inclusion proofs directly against the `wam_root` in the block header.
+The WAM is derived deterministically from [EIP-7928](./eip-7928.md) BAL history. Light clients can either compute `WAM_ROOT` from BAL history or verify (non-)inclusion proofs directly against the `wam_root` in the block header.
 
 ## Copyright
 
-Copyright and related rights waived via [CC0](../LICENSE).
+Copyright and related rights waived via [CC0](../LICENSE.md).
