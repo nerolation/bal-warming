@@ -64,11 +64,11 @@ There is no single "best W". The efficiency curve is monotonically decreasing, s
 
 Three operating points stand out:
 
-1. **W = 8 (96 s)** — the minimum viable horizon for cross-block warming. 61 % of cold ops converted, < 1 MB of WAM state. Captures the "obviously hot" routing/DEX/proxy targets. Fits trivially in any node and is shorter than the finality horizon by an order of magnitude.
+1. **W = 8 (96 s)**: the minimum viable horizon for cross-block warming. 61 % of cold ops converted, < 1 MB of WAM state. Captures the "obviously hot" routing/DEX/proxy targets. Fits trivially in any node and is shorter than the finality horizon by an order of magnitude.
 
-2. **W = 32 (6.4 min, ≈ 1 epoch)** — sweet spot for protocol elegance. 71 % converted, ~2 MB of WAM. Aligns with the epoch boundary, so reorg handling collapses to "drop and recompute the last epoch's transitions". The marginal-cost row at W=32 (121 items per added hit) is the last doubling that still feels cheap.
+2. **W = 32 (6.4 min, ≈ 1 epoch)**: sweet spot for protocol elegance. 71 % converted, ~2 MB of WAM. Aligns with the epoch boundary, so reorg handling collapses to "drop and recompute the last epoch's transitions". The marginal-cost row at W=32 (121 items per added hit) is the last doubling that still feels cheap.
 
-3. **W = 128 (~25 min)** — sweet spot for benefit. 79 % converted, ~6 MB of WAM. Captures most of what is recoverable at modest cost. The next doubling (W=256) costs ~1 050 items per added hit, which is the point where the efficiency starts to feel poor.
+3. **W = 128 (~25 min)**: sweet spot for benefit. 79 % converted, ~6 MB of WAM. Captures most of what is recoverable at modest cost. The next doubling (W=256) costs ~1 050 items per added hit, which is the point where the efficiency starts to feel poor.
 
 By contrast, **W = 7200 (the current EIP value)** would hold roughly 3 million items (~180 MB at 60 B/item, plus SMT nodes) and add only ~5–10 % more hits than W=128. The marginal cost there is on the order of 10 000+ items per added hit.
 
