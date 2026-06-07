@@ -78,7 +78,15 @@ leaf_value     = u32 counter (0 if absent)
 WAM_ROOT       = SMT root over { leaf_key → leaf_value }
 ```
 
-SHA-256 is used for both leaf keys and node hashing (matching beacon-chain SSZ Merkleization; precompile `0x02`). `WAM_ROOT` is added to the block header as a new field. The per-block transition updates the SMT incrementally: one leaf update per item in `ADD ∪ DEL`. Order does not affect the root since SMT structure depends only on leaf keys.
+SHA-256 is used for both leaf keys and node hashing (matching beacon-chain SSZ Merkleization; precompile `0x02`). `WAM_ROOT` is added to the block header as a new 32-byte field `wam_root`:
+
+```python
+class Header:
+    ...
+    wam_root: Hash32
+```
+
+The per-block transition updates the SMT incrementally: one leaf update per item in `ADD ∪ DEL`. Order does not affect the root since SMT structure depends only on leaf keys.
 
 Inclusion or non-inclusion proofs consist of 256 sibling hashes (fixed shape, independent of `|WAM|`). A future ZK-friendly hash precompile (e.g., Poseidon) can replace `SHA256` without changing the structure.
 
