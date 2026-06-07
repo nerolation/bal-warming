@@ -13,7 +13,7 @@ requires: 2929, 2930, 7928
 
 ## Abstract
 
-A new chain-state structure, the **warm-access multiset (WAM)**, maps each `(address, slot?)` item to the number of the last 256 blocks whose Block Access List (BAL, per [EIP-7928](./eip-7928.md)) contains that item. Items present in the WAM at the start of a block are treated as already-accessed for [EIP-2929](./eip-2929.md) pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes 100 instead of 2100. The WAM updates incrementally each block (+1 for items in the new BAL, −1 for items in the BAL aging out), so additions and removals are O(|BAL|) per block.
+A new chain-state structure, the **warm-access multiset (WAM)**, maps each accessed item (an account address or an `(address, storage_key)` pair) to the number of the last 256 blocks whose Block Access List (BAL, per [EIP-7928](./eip-7928.md)) contains it. Items present in the WAM at the start of a block are treated as already-accessed for [EIP-2929](./eip-2929.md) pricing in every transaction of that block: account-access opcodes pay 100 gas instead of 2600, storage-access opcodes pay 100 instead of 2100. The WAM is updated incrementally each block by incrementing the count of every item in the new BAL and decrementing the count of every item in the BAL leaving the window, so the per-block update is `O(|BAL|)`.
 
 ## Motivation
 
@@ -55,8 +55,8 @@ Items not present have count 0. **An item is *warm* iff `WAM[item] > 0`.**
 Before transaction execution in block `B`:
 
 ```
-ADD = items(BAL(B − 1))                       # most recently sealed BAL
-DEL = items(BAL(B − 1 − WARMING_WINDOW))      # BAL aging out; empty if B ≤ WARMING_WINDOW
+ADD = items(BAL(B − 1))
+DEL = items(BAL(B − 1 − WARMING_WINDOW))      # empty if B ≤ WARMING_WINDOW
 
 for item in ADD:
     WAM[item] += 1
@@ -66,9 +66,9 @@ for item in DEL:
         delete WAM[item]
 ```
 
-Order is fixed (`ADD` before `DEL`) so items present in both do not transiently drop to 0. The final `WAM` is order-independent; the fixed order simplifies proofs.
+`ADD` is applied before `DEL` so items appearing in both do not transiently reach zero. The final `WAM` is independent of update order.
 
-The transition mutates the WAM in place; no per-block snapshot is required. Historical `items(BAL(N))` for `N ≥ B − 1 − WARMING_WINDOW` are needed for `DEL`, which [EIP-7928](./eip-7928.md) already provides.
+Historical `items(BAL(N))` for `N ≥ B − 1 − WARMING_WINDOW` are needed to evaluate `DEL` and are already available from [EIP-7928](./eip-7928.md).
 
 ### Commitment
 
@@ -98,14 +98,14 @@ At the start of every transaction in block `B`, the per-tx access list is initia
 
 ### Pricing
 
-No new gas constants. For every opcode that consults the access list:
+No new gas constants. For every access-list-priced opcode:
 
-- if the operand is `Account(target)` or `Slot(executing_contract, key)` and the item is warm (in the WAM or already added during this tx), it pays the warm cost (`100` gas for both account and storage);
-- otherwise, the cold cost (`2600` for accounts, `2100` for storage). The item is then added to the per-tx access list as in [EIP-2929](./eip-2929.md).
+- if its operand item is warm (present in the WAM or added earlier in this transaction), it pays the warm cost: `100` gas for both account and storage access;
+- otherwise it pays the cold cost (`2600` for accounts, `2100` for storage), and the item is added to the per-transaction access list as in [EIP-2929](./eip-2929.md).
 
 ### Revert semantics
 
-Intra-tx revert behaves as in [EIP-2929](./eip-2929.md): entries added to the per-tx access list inside a reverted sub-call are removed. The WAM only changes at block boundaries and is not affected by transaction revert.
+The WAM is mutated only by the per-block transition. Transaction execution, including reverts, does not modify it.
 
 ### Genesis and activation
 
@@ -123,7 +123,7 @@ Multi-block warming is a sliding-window union of BAL items. Three representation
 | Store 256 raw BALs, materialize union as a set | O(1) | O(union recompute), expensive | O(union recompute) |
 | **Refcounted multiset (this EIP)** | **O(1)** | **O(\|BAL_in\| + \|BAL_out\|)** | **O(WARMING_WINDOW · avg \|BAL\|)** |
 
-The multiset wins on both hot paths: membership during tx execution and steady-state per-block update. Reorg cost is identical across representations.
+The refcounted multiset is preferable on both the membership-test path (consulted on every access-list-priced opcode) and the per-block update path. Reorg recomputation cost is identical across all three representations.
 
 ### Why 256 blocks
 
@@ -141,11 +141,9 @@ Median per-block trade-off on a 5 731-block mainnet sample:
 
 W=256 captures ~76 % of the gas asymptote at ~10 MB of WAM state and sits 4× past the finality horizon. The next doubling (W=512) triples the marginal cost per added warm conversion for only ~2 percentage points more, so W=256 is at the inflection of the cost-benefit curve.
 
-Implementations that prioritise memory can pick W=8 (~0.6 MB, 57 % ops), W=16 (~1 MB, 64 %), or W=32 (~2 MB, 68 %, also one epoch). Implementations with memory to spare can pick W=512 (~18 MB, 82 %); past that the cost-benefit deteriorates sharply.
-
 ### Reuse of EIP-7928 BALs
 
-[EIP-7928](./eip-7928.md) introduces a canonical Block Access List committed to the block header. This proposal reuses that artifact as the per-block "add" set and (via history lookup) as the "delete" set. Without [EIP-7928](./eip-7928.md), this EIP would need its own access-list commitment, which is out of scope.
+[EIP-7928](./eip-7928.md) introduces a canonical Block Access List committed to the block header. This specification consumes that artifact directly as the source of `ADD` and `DEL` items. Without [EIP-7928](./eip-7928.md), this EIP would need an independent access-list commitment mechanism, which is out of scope.
 
 ### Binary SMT (not MPT) and SHA-256 (not Keccak)
 
@@ -181,7 +179,7 @@ Forward-only: every existing transaction pays the same or less gas. No transacti
 
 ## Test Cases
 
-To be added. Reference scenarios:
+To be added. Reference scenarios for a storage slot `(c, s)`:
 
 1. Block `N−1`: SLOAD on `(c, s)`. Cold (2100). `items(BAL(N−1))` now contains `Slot(c, s)`.
 2. Block `N`: WAM has `Slot(c, s) → 1`. SLOAD on `(c, s)`. **Warm (100)**.
@@ -192,11 +190,11 @@ To be added. Reference scenarios:
 
 ### State growth and DoS
 
-Inflating the WAM costs the attacker ≥ 2100 gas per item, the same as today. The 2000–2500 gas saving accrues only to later legitimate accessors of that exact item, not to the attacker. No economic incentive to inflate.
+Adding an item to the WAM requires paying the [EIP-2929](./eip-2929.md) cold cost (≥ 2100 gas), which is unchanged from today. The 2000–2500 gas saving accrues only to subsequent legitimate accessors of the same item, not to the contributor, so there is no economic incentive to inflate the WAM.
 
 ### Memory pressure
 
-At ~10 MB the WAM fits trivially in memory alongside other node caches. A hash map of items to small counters does not require cold-tier storage.
+At ~10 MB the WAM fits in memory alongside existing node caches. A hash map of items to small counters does not require cold-tier storage.
 
 ### Reorg behavior
 
